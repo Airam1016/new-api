@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
@@ -147,6 +149,9 @@ func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel,
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
 			if channel.GetPriority() == targetPriority {
+				if checkAndSkipRateLimitedChannel(channelId, channel) {
+					continue
+				}
 				sumWeight += channel.GetWeight()
 				targetChannels = append(targetChannels, channel)
 			}
@@ -156,7 +161,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int) (*Channel,
 	}
 
 	if len(targetChannels) == 0 {
-		return nil, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
+		return nil, nil
 	}
 
 	// smoothing factor and adjustment
@@ -257,9 +262,54 @@ func CacheUpdateChannel(channel *Channel) {
 		return
 	}
 
-	println("CacheUpdateChannel:", channel.Id, channel.Name, channel.Status, channel.ChannelInfo.MultiKeyPollingIndex)
-
-	println("before:", channelsIDM[channel.Id].ChannelInfo.MultiKeyPollingIndex)
 	channelsIDM[channel.Id] = channel
-	println("after :", channelsIDM[channel.Id].ChannelInfo.MultiKeyPollingIndex)
+}
+
+const channelRPMTimeFormat = "2006-01-02T15:04:05.000Z"
+
+func checkAndSkipRateLimitedChannel(channelId int, channel *Channel) bool {
+	settings := channel.GetSetting()
+	if settings.RateLimitCount <= 0 || !common.RedisEnabled {
+		return false
+	}
+	duration := int64(settings.RateLimitDuration)
+	if duration <= 0 {
+		duration = 60
+	}
+	ctx := context.Background()
+	key := fmt.Sprintf("channel_rpm:%d", channelId)
+	count, err := common.RDB.LLen(ctx, key).Result()
+	if err != nil {
+		return false
+	}
+	if count < int64(settings.RateLimitCount) {
+		return false
+	}
+	oldest, err := common.RDB.LIndex(ctx, key, -1).Result()
+	if err != nil {
+		return false
+	}
+	t, err := time.Parse(channelRPMTimeFormat, oldest)
+	if err != nil {
+		return false
+	}
+	if int64(time.Since(t).Seconds()) >= duration {
+		return false
+	}
+	return true
+}
+
+func RecordChannelRateLimit(channelId int, settings dto.ChannelSettings) {
+	if settings.RateLimitCount <= 0 || !common.RedisEnabled {
+		return
+	}
+	duration := settings.RateLimitDuration
+	if duration <= 0 {
+		duration = 60
+	}
+	ctx := context.Background()
+	key := fmt.Sprintf("channel_rpm:%d", channelId)
+	common.RDB.LPush(ctx, key, time.Now().Format(channelRPMTimeFormat))
+	common.RDB.LTrim(ctx, key, 0, int64(settings.RateLimitCount-1))
+	common.RDB.Expire(ctx, key, time.Duration(duration+30)*time.Second)
 }

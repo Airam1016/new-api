@@ -195,6 +195,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = channelErr
 			break
 		}
+		if channel == nil {
+			continue
+		}
 
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
@@ -222,6 +225,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
+			if relayInfo.ChannelMeta != nil {
+				model.RecordChannelRateLimit(channel.Id, channel.GetSetting())
+			}
 			return
 		}
 
